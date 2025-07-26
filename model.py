@@ -276,11 +276,17 @@ class Model(nn.Module):
         self.mlp_readout_common = nn.ModuleList([nn.Linear(num_nodes[i], 1) for i in range(self.num_atlas)])
         self.mlp_readout_specific = nn.ModuleList([nn.Linear(num_nodes[i], 1) for i in range(self.num_atlas)])
         '''
-            attention fusion
+            decision level fusion
         '''
-        self.attention = AttentionFusionModel(input_dim=args.gcn_out, num_templates=args.num_atlas, output_dim=args.gcn_out)
-
-        self.linear_disease_classification = nn.Linear(args.gcn_out, 2)
+        self.linear_vote_classification = nn.ModuleList([nn.Sequential(
+            nn.Linear(args.gcn_out, 128),
+            nn.Dropout(args.dropout),
+            nn.LeakyReLU(0.33),
+            nn.Linear(128, 32),
+            nn.Dropout(args.dropout),
+            nn.LeakyReLU(0.33),
+            nn.Linear(32, 2),
+        ) for _ in range(self.num_atlas)])
 
     def forward(self, data, label, flag1, flag2, temperature, flag3):
 
@@ -290,13 +296,11 @@ class Model(nn.Module):
             data[index] = F.normalize(node, p=2, dim=-1)
         x_common = []
         x_specific = []
-        # x_weight = []
         for i in range(len(data)):
             x_shared, _ = self.gcn_shared(data[i], self.H[i])
             x_shared = F.relu(x_shared)
             x_shared = F.dropout(x_shared, self.dropout)
             common, _ = self.gcn_com(x_shared, self.H[i])
-            # x_weight.append(weight)
             x_common.append(torch.transpose(common, 1, 2))
             specific, _ = self.gcn_spe(x_shared, self.H[i])
             x_specific.append(torch.transpose(specific, 1, 2))
@@ -323,10 +327,11 @@ class Model(nn.Module):
             neg_loss = torch.cat(neg_loss, dim=1)
             cont_loss = (-pos_loss + torch.logsumexp(neg_loss, dim=-1)).mean()
 
-        x = torch.stack(x_common, dim=1)
-        x = self.attention(x)
-        if flag2 == 'cc':
-            cc_loss = self.Cc(x, label)
-        x = self.linear_disease_classification(x)
+        for index_vote, mlp_vote in enumerate(self.linear_vote_classification):
+            if flag2 == 'cc':
+                cc_loss += self.Cc(x_common[index_vote], label)
+            vote = mlp_vote(x_common[index_vote])
+            x_common[index_vote] = F.softmax(vote, dim=-1)
+        x = sum(x_common)
 
         return x, None, cont_loss, cc_loss
